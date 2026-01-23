@@ -1,0 +1,160 @@
+name: "Deploy Infrastructure"
+
+on:
+  workflow_dispatch:
+    inputs:
+      components:
+        description: "Comma-separated components to deploy (all,ecr,lambda,apigateway,dynamodb)"
+        required: false
+        default: "all"
+      aws_region:
+        description: 'AWS region'
+        required: false
+        default: 'us-east-1'
+      backend_bucket:
+        description: 'S3 bucket name for Terraform backend (already created)'
+        required: true
+      backend_table:
+        description: 'DynamoDB table name for Terraform state locking (already created)'
+        required: true
+      image_tag:
+        description: 'Docker image tag to push/use for Lambda (if pushing an image)'
+        required: false
+        default: 'latest'
+      image_dir:
+        description: 'Path to Docker context (relative to repository root)'
+        required: false
+        default: '.'
+      image_uri:
+        description: '(Optional) existing image URI to use for Lambda (overrides building/pushing)'
+        required: false
+      lambda_arn:
+        description: '(Optional) existing Lambda function ARN to use for API Gateway (skips deploying lambda in this run)'
+        required: false
+      lambda_name:
+        description: '(Optional) existing Lambda function name to use for API Gateway permission'
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      BACKEND_BUCKET: ${{ github.event.inputs.backend_bucket }}
+      BACKEND_TABLE: ${{ github.event.inputs.backend_table }}
+      IMAGE_TAG: ${{ github.event.inputs.image_tag }}
+      IMAGE_DIR: ${{ github.event.inputs.image_dir }}
+      COMPONENTS: ${{ github.event.inputs.components }}
+      IMAGE_URI_INPUT: ${{ github.event.inputs.image_uri }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.0'
+
+      - name: Deploy ECR repository (terraform)
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
+        id: ecr_apply
+        run: |
+          terraform -chdir=infrastructure/ecr init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=ecr/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+          terraform -chdir=infrastructure/ecr apply -auto-approve -var "region=${{ env.AWS_REGION }}"
+          repo_url=$(terraform -chdir=infrastructure/ecr output -raw repository_url)
+          echo "repo_url=${repo_url}" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image to ECR
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
+        run: |
+          repo_url=${{ steps.ecr_apply.outputs.repo_url }}
+          if [ -z "$repo_url" ]; then echo "repo_url not found" && exit 1; fi
+          repo_domain=${repo_url%%/*}
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $repo_domain
+          docker build -t ${repo_url}:${IMAGE_TAG} $IMAGE_DIR
+          docker push ${repo_url}:${IMAGE_TAG}
+
+      - name: Deploy Lambda (terraform)
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'lambda') }}
+        id: lambda_apply
+        run: |
+          # Determine image_uri: prefer input IMAGE_URI, else use built image
+          image_uri="${IMAGE_URI_INPUT}"
+          if [ -z "$image_uri" ]; then
+            if [ -n "${{ steps.ecr_apply.outputs.repo_url }}" ]; then
+              image_uri="${{ steps.ecr_apply.outputs.repo_url }}:${IMAGE_TAG}"
+            fi
+          fi
+          if [ -z "$image_uri" ]; then
+            echo "No image URI available: set workflow input image_uri or deploy the ecr component first" && exit 1
+          fi
+
+          terraform -chdir=infrastructure/lambda init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=lambda/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          terraform -chdir=infrastructure/lambda apply -auto-approve \
+            -var "image_uri=${image_uri}" -var "region=${{ env.AWS_REGION }}"
+
+          fn_arn=$(terraform -chdir=infrastructure/lambda output -raw function_arn)
+          fn_name=$(terraform -chdir=infrastructure/lambda output -raw function_name)
+          echo "fn_arn=${fn_arn}" >> $GITHUB_OUTPUT
+          echo "fn_name=${fn_name}" >> $GITHUB_OUTPUT
+
+      - name: Deploy API Gateway (terraform)
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'apigateway') }}
+        run: |
+          # Prefer provided inputs; fallback to the lambda apply outputs
+          fn_arn="${{ github.event.inputs.lambda_arn }}"
+          fn_name="${{ github.event.inputs.lambda_name }}"
+          if [ -z "$fn_arn" ]; then
+            fn_arn="${{ steps.lambda_apply.outputs.fn_arn }}"
+          fi
+          if [ -z "$fn_name" ]; then
+            fn_name="${{ steps.lambda_apply.outputs.fn_name }}"
+          fi
+
+          if [ -z "$fn_arn" ]; then
+            echo "function ARN not found. Ensure lambda was deployed first or pass lambda_arn input." && exit 1
+          fi
+
+          terraform -chdir=infrastructure/apigateway init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=apigateway/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          terraform -chdir=infrastructure/apigateway apply -auto-approve \
+            -var "lambda_arn=${fn_arn}" -var "lambda_name=${fn_name}" -var "region=${{ env.AWS_REGION }}"
+
+      - name: Deploy DynamoDB (terraform)
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'dynamodb') }}
+        run: |
+          terraform -chdir=infrastructure/dynamodb init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=dynamodb/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          terraform -chdir=infrastructure/dynamodb apply -auto-approve -var "region=${{ env.AWS_REGION }}"
+
+      - name: Output summary
+        run: |
+          echo "Deployed components: ${COMPONENTS}"
+          echo "ECR repo: ${repo_url:-(not created in this run)}"
+          echo "Lambda ARN: ${{ steps.lambda_apply.outputs.fn_arn }}"
+

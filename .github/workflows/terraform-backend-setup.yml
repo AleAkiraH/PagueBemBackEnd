@@ -1,0 +1,52 @@
+name: "Terraform Backend Setup"
+
+on:
+  workflow_dispatch:
+    inputs:
+      bucket_name:
+        description: 'S3 bucket name for Terraform state (must be globally unique)'
+        required: true
+      dynamodb_table_name:
+        description: 'DynamoDB table name for Terraform state lock'
+        required: true
+      aws_region:
+        description: 'AWS region'
+        required: false
+        default: 'us-east-1'
+
+jobs:
+  terraform-backend:
+    name: Create backend (S3 + DynamoDB)
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.0'
+
+      - name: Terraform Init
+        run: terraform -chdir=infrastructure/backend init
+
+      - name: Terraform Apply
+        run: |
+          terraform -chdir=infrastructure/backend apply -auto-approve \
+            -var "bucket_name=${{ github.event.inputs.bucket_name }}" \
+            -var "dynamodb_table_name=${{ github.event.inputs.dynamodb_table_name }}" \
+            -var "region=${{ env.AWS_REGION }}"
+
+      - name: Output results
+        run: |
+          echo "Bucket: $(terraform -chdir=infrastructure/backend output -raw bucket_name)"
+          echo "DynamoDB table: $(terraform -chdir=infrastructure/backend output -raw dynamodb_table_name)"

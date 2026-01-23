@@ -1,0 +1,92 @@
+name: "Destroy Infrastructure"
+
+on:
+  workflow_dispatch:
+    inputs:
+      components:
+        description: "Comma-separated components to destroy (all,apigateway,lambda,ecr,dynamodb)"
+        required: false
+        default: "all"
+      aws_region:
+        description: 'AWS region'
+        required: false
+        default: 'us-east-1'
+      backend_bucket:
+        description: 'S3 bucket name for Terraform backend (state bucket)'
+        required: true
+      backend_table:
+        description: 'DynamoDB table name for Terraform state locking'
+        required: true
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ github.event.inputs.aws_region }}
+      BACKEND_BUCKET: ${{ github.event.inputs.backend_bucket }}
+      BACKEND_TABLE: ${{ github.event.inputs.backend_table }}
+      COMPONENTS: ${{ github.event.inputs.components }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.0'
+
+      - name: Destroy API Gateway
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'apigateway') }}
+        run: |
+          terraform -chdir=infrastructure/apigateway init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=apigateway/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          terraform -chdir=infrastructure/apigateway destroy -auto-approve -var "region=${{ env.AWS_REGION }}"
+
+      - name: Destroy Lambda
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'lambda') }}
+        run: |
+          terraform -chdir=infrastructure/lambda init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=lambda/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          terraform -chdir=infrastructure/lambda destroy -auto-approve -var "region=${{ env.AWS_REGION }}"
+
+      - name: Destroy ECR repository
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
+        run: |
+          terraform -chdir=infrastructure/ecr init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=ecr/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          terraform -chdir=infrastructure/ecr destroy -auto-approve -var "region=${{ env.AWS_REGION }}"
+
+      - name: Destroy DynamoDB
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'dynamodb') }}
+        run: |
+          terraform -chdir=infrastructure/dynamodb init \
+            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
+            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="key=dynamodb/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          terraform -chdir=infrastructure/dynamodb destroy -auto-approve -var "region=${{ env.AWS_REGION }}"
+
+      - name: Summary
+        run: |
+          echo "Destroyed components: ${COMPONENTS}"

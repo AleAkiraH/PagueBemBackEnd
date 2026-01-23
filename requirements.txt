@@ -1,0 +1,7 @@
+Pillow
+pyzbar
+opencv-python-headless
+numpy
+flask
+awslambdaric
+# Note: pyzbar requires the native libzbar library to be present in the image (we install it in the Dockerfile).
