@@ -3,12 +3,10 @@ name: "Terraform Backend Setup"
 on:
   workflow_dispatch:
     inputs:
-      bucket_name:
-        description: 'S3 bucket name for Terraform state (must be globally unique)'
-        required: true
-      dynamodb_table_name:
-        description: 'DynamoDB table name for Terraform state lock'
-        required: true
+      env:
+        description: 'Environment suffix to include in generated resource names (e.g. dev, prod). Defaults to "dev"'
+        required: false
+        default: 'dev'
       aws_region:
         description: 'AWS region'
         required: false
@@ -18,8 +16,9 @@ jobs:
   terraform-backend:
     name: Create backend (S3 + DynamoDB)
     runs-on: ubuntu-latest
-    env:
-      AWS_REGION: ${{ github.event.inputs.aws_region }}
+    outputs:
+      bucket_name: ${{ steps.prepare.outputs.bucket_name }}
+      dynamodb_table_name: ${{ steps.prepare.outputs.dynamodb_table_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,12 +28,43 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: ${{ github.event.inputs.aws_region }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: '1.5.0'
+
+      - name: Prepare backend resource names
+        id: prepare
+        run: |
+          echo "Preparing backend names..."
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          # sanitize owner and repo names: lowercase + only a-z0-9 and hyphen
+          OWNER_CLEAN=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
+          REPO_CLEAN=$(echo "$REPO" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
+
+          ENV_NAME="${{ github.event.inputs.env }}"
+          if [ -z "$ENV_NAME" ]; then ENV_NAME=dev; fi
+
+          BUCKET="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate"
+          DDB="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate-locks"
+
+          echo "Computed bucket: $BUCKET"
+          echo "Computed dynamodb table: $DDB"
+
+          # Validate S3 bucket name
+          if ! echo "$BUCKET" | grep -E -q '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'; then
+            echo "ERROR: computed S3 bucket name '$BUCKET' is invalid for S3. Try changing the repository name or the 'env' input." >&2
+            exit 1
+          fi
+
+          echo "bucket_name=$BUCKET" >> $GITHUB_OUTPUT
+          echo "dynamodb_table_name=$DDB" >> $GITHUB_OUTPUT
+
+          echo "BUCKET_NAME=$BUCKET" >> $GITHUB_ENV
+          echo "DDB_NAME=$DDB" >> $GITHUB_ENV
 
       - name: Terraform Init
         run: terraform -chdir=infrastructure/backend init
@@ -42,9 +72,9 @@ jobs:
       - name: Terraform Apply
         run: |
           terraform -chdir=infrastructure/backend apply -auto-approve \
-            -var "bucket_name=${{ github.event.inputs.bucket_name }}" \
-            -var "dynamodb_table_name=${{ github.event.inputs.dynamodb_table_name }}" \
-            -var "region=${{ env.AWS_REGION }}"
+            -var "bucket_name=$BUCKET_NAME" \
+            -var "dynamodb_table_name=$DDB_NAME" \
+            -var "region=${{ github.event.inputs.aws_region }}"
 
       - name: Output results
         run: |

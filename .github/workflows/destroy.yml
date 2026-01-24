@@ -11,20 +11,16 @@ on:
         description: 'AWS region'
         required: false
         default: 'us-east-1'
-      backend_bucket:
-        description: 'S3 bucket name for Terraform backend (state bucket)'
-        required: true
-      backend_table:
-        description: 'DynamoDB table name for Terraform state locking'
-        required: true
+      env:
+        description: 'Environment suffix to include in generated backend names (e.g. dev, prod)'
+        required: false
+        default: 'dev'
 
 jobs:
   destroy:
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ github.event.inputs.aws_region }}
-      BACKEND_BUCKET: ${{ github.event.inputs.backend_bucket }}
-      BACKEND_TABLE: ${{ github.event.inputs.backend_table }}
       COMPONENTS: ${{ github.event.inputs.components }}
 
     steps:
@@ -43,12 +39,37 @@ jobs:
         with:
           terraform_version: '1.5.0'
 
+      - name: Prepare backend names
+        id: prepare_backend
+        run: |
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          # sanitize owner and repo names: lowercase + only a-z0-9 and hyphen
+          OWNER_CLEAN=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
+          REPO_CLEAN=$(echo "$REPO" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
+
+          ENV_NAME="${{ github.event.inputs.env }}"
+          if [ -z "$ENV_NAME" ]; then ENV_NAME=dev; fi
+
+          BACKEND_BUCKET="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate"
+          BACKEND_TABLE="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate-locks"
+
+          # Validate bucket name
+          if ! echo "$BACKEND_BUCKET" | grep -E -q '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'; then
+            echo "ERROR: computed S3 bucket name '$BACKEND_BUCKET' is invalid for S3. Try changing the repository name or the 'env' input." >&2
+            exit 1
+          fi
+
+          echo "BACKEND_BUCKET=$BACKEND_BUCKET" >> $GITHUB_ENV
+          echo "BACKEND_TABLE=$BACKEND_TABLE" >> $GITHUB_ENV
+          echo "Using backend bucket: $BACKEND_BUCKET and table: $BACKEND_TABLE"
+
       - name: Destroy API Gateway
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'apigateway') }}
         run: |
           terraform -chdir=infrastructure/apigateway init \
-            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
-            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="bucket=$BACKEND_BUCKET" \
+            -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=apigateway/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 
@@ -58,8 +79,8 @@ jobs:
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'lambda') }}
         run: |
           terraform -chdir=infrastructure/lambda init \
-            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
-            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="bucket=$BACKEND_BUCKET" \
+            -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=lambda/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 
@@ -69,8 +90,8 @@ jobs:
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
         run: |
           terraform -chdir=infrastructure/ecr init \
-            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
-            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="bucket=$BACKEND_BUCKET" \
+            -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=ecr/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 
@@ -80,8 +101,8 @@ jobs:
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'dynamodb') }}
         run: |
           terraform -chdir=infrastructure/dynamodb init \
-            -backend-config="bucket=${{ env.BACKEND_BUCKET }}" \
-            -backend-config="dynamodb_table=${{ env.BACKEND_TABLE }}" \
+            -backend-config="bucket=$BACKEND_BUCKET" \
+            -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=dynamodb/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 

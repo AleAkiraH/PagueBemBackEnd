@@ -15,3 +15,21 @@ General workflow:
 3. Use the `Destroy` workflow to tear down modules when necessary.
 
 All workflows are manual (`workflow_dispatch`) and will not run automatically.
+
+Default naming and convenience
+
+If you prefer not to fill backend names when running the manual workflows, the workflows will generate sensible defaults automatically using this pattern:
+
+- S3 bucket for Terraform state: <owner>-<repo>-<env>-tfstate
+- DynamoDB table for locks: <owner>-<repo>-<env>-tfstate-locks
+
+where:
+- owner = GitHub repository owner (your username or organization)
+- repo = GitHub repository name (sanitized: lowercase, non-alphanumeric replaced with '-')
+- env = environment input to the workflow (default: `dev`)
+
+Example generated names:
+- `aleakirah-paguebembackend-dev-tfstate`
+- `aleakirah-paguebembackend-dev-tfstate-locks`
+
+The workflows validate the generated S3 bucket name and will fail early if it doesn't meet S3 naming rules; in that case provide a custom `bucket_name` input when triggering the workflow.

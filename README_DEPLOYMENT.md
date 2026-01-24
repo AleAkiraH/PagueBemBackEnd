@@ -28,3 +28,21 @@ The AWS credentials used by the GitHub workflows must have enough permissions to
 - apigateway:* (for creating the API)
 
 For production use, prefer provisioning a least-privilege IAM principal specifically for CI/CD and store its keys in GitHub Secrets.
+
+Defaults to reduce manual inputs
+
+Workflows will auto-generate Terraform backend resource names if you don't provide them when triggering the workflow. Defaults follow the pattern `<owner>-<repo>-<env>-tfstate` (for the S3 bucket) and `<owner>-<repo>-<env>-tfstate-locks` (for the DynamoDB lock table). The `env` input defaults to `dev`.
+
+If you want to provide stable names for all environments (recommended for production), pass `bucket_name` and `dynamodb_table_name` when running the `Terraform Backend Setup` workflow. For CI/test runs you can skip these inputs and let the workflow choose reasonable defaults for you.
+
+Quick reminder on environment names
+
+- The workflows generate backend names automatically when you leave the backend fields blank.
+- Defaults follow the pattern `<owner>-<repo>-<env>-tfstate` for the S3 bucket and `<owner>-<repo>-<env>-tfstate-locks` for the DynamoDB lock table. The `env` defaults to `dev`.
+- Ensure you use the same `env` when running `Terraform Backend Setup` and `Deploy` so they target the same bucket/table.
+
+For this repository (owner: `AleAkiraH`, repo: `PagueBemBackEnd`) the computed defaults would be:
+- `aleakirah-paguebembackend-dev-tfstate`
+- `aleakirah-paguebembackend-dev-tfstate-locks`
+
+If you prefer a different naming scheme, edit the workflow or provide a stable backend in your own Terraform automation.
