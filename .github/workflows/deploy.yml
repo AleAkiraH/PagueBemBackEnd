@@ -89,9 +89,21 @@ jobs:
             -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=ecr/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+
+          # Determine expected repository name (from module default or variable)
+          REPO_NAME="paguebem-qrreader"
+
+          # If repository already exists in ECR, import it into Terraform state to avoid create errors
+          if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "ECR repository $REPO_NAME already exists; importing into Terraform state (if not already imported)"
+            terraform -chdir=infrastructure/ecr import -lock=false aws_ecr_repository.this "$REPO_NAME" || true
+          fi
+
+          # Apply will create or reconcile repository configuration
           terraform -chdir=infrastructure/ecr apply -auto-approve -var "region=${{ env.AWS_REGION }}"
-          repo_url=$(terraform -chdir=infrastructure/ecr output -raw repository_url 2>/dev/null | tr -d '\r')
-          # Use the env file "here-doc" format to safely set multi-line or special-value outputs
+
+          # Get repository URI from AWS and set as output safely
+          repo_url=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text 2>/dev/null | tr -d '\r')
           echo "repo_url<<EOF" >> $GITHUB_OUTPUT
           echo "$repo_url" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
