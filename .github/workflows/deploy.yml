@@ -90,8 +90,11 @@ jobs:
             -backend-config="key=ecr/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
           terraform -chdir=infrastructure/ecr apply -auto-approve -var "region=${{ env.AWS_REGION }}"
-          repo_url=$(terraform -chdir=infrastructure/ecr output -raw repository_url)
-          echo "repo_url=${repo_url}" >> $GITHUB_OUTPUT
+          repo_url=$(terraform -chdir=infrastructure/ecr output -raw repository_url 2>/dev/null | tr -d '\r')
+          # Use the env file "here-doc" format to safely set multi-line or special-value outputs
+          echo "repo_url<<EOF" >> $GITHUB_OUTPUT
+          echo "$repo_url" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image to ECR
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
@@ -127,10 +130,14 @@ jobs:
           terraform -chdir=infrastructure/lambda apply -auto-approve \
             -var "image_uri=${image_uri}" -var "region=${{ env.AWS_REGION }}"
 
-          fn_arn=$(terraform -chdir=infrastructure/lambda output -raw function_arn)
-          fn_name=$(terraform -chdir=infrastructure/lambda output -raw function_name)
-          echo "fn_arn=${fn_arn}" >> $GITHUB_OUTPUT
-          echo "fn_name=${fn_name}" >> $GITHUB_OUTPUT
+          fn_arn=$(terraform -chdir=infrastructure/lambda output -raw function_arn 2>/dev/null | tr -d '\r')
+          fn_name=$(terraform -chdir=infrastructure/lambda output -raw function_name 2>/dev/null | tr -d '\r')
+          echo "fn_arn<<EOF" >> $GITHUB_OUTPUT
+          echo "$fn_arn" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "fn_name<<EOF" >> $GITHUB_OUTPUT
+          echo "$fn_name" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Deploy API Gateway (terraform)
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'apigateway') }}
