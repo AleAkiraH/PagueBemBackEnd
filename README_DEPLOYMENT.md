@@ -5,6 +5,7 @@
   - `Terraform Backend Setup` - creates the S3 bucket and DynamoDB table to be used as the Terraform remote backend and locking table. Run this first (provide `bucket_name` and `dynamodb_table_name`).
   - `Deploy Infrastructure` - deploys components (ECR -> Lambda -> API Gateway -> DynamoDB). Inputs let you choose which components to deploy and the backend bucket/table to use for Terraform state.
   - `Destroy Infrastructure` - tears down resources (manual trigger, choose which components to destroy).
+  - `Import Existing Resources` - imports existing AWS resources (ECR repo, IAM role, Lambda function) into Terraform management.
 
 ## Required GitHub repository secrets:
 
@@ -46,3 +47,16 @@ For this repository (owner: `AleAkiraH`, repo: `PagueBemBackEnd`) the computed d
 - `aleakirah-paguebembackend-dev-tfstate-locks`
 
 If you prefer a different naming scheme, edit the workflow or provide a stable backend in your own Terraform automation.
+
+Importing existing resources
+
+If you already have existing AWS resources (ECR repo, IAM role, Lambda function) and you want Terraform to manage them, use the manual workflow "Import Existing Resources" (Actions -> Import Existing Resources). The workflow will:
+- Import ECR repository into `infrastructure/ecr` state
+- Import IAM role into `infrastructure/lambda` state
+- Import Lambda function into `infrastructure/lambda` state
+
+Important: The Deploy workflow now runs a preflight check and will fail if it detects resources that already exist (to prevent accidental conflicts). Run the Import workflow first to bring those resources into state, then re-run Deploy.
+
+Steps to import manually (example):
+1) Actions -> Import Existing Resources -> Run workflow (choose components `all`), wait for success
+2) Actions -> Deploy Infrastructure -> Run workflow (components `all`)

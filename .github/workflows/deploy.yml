@@ -36,7 +36,112 @@ on:
         default: ''
 
 jobs:
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    outputs:
+      bucket_name: ${{ steps.prepare.outputs.bucket_name }}
+      dynamodb_table_name: ${{ steps.prepare.outputs.dynamodb_table_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ github.event.inputs.aws_region }}
+
+      - name: Install lint tools
+        run: |
+          python3 -m pip install --upgrade pip yamllint
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.5.0'
+
+      - name: Validate workflow YAML
+        run: |
+          yamllint .github/workflows/*.yml || true
+
+      - name: Terraform fmt / validate for modules
+        run: |
+          set -euo pipefail
+          for d in infrastructure/*; do
+            if [ -d "$d" ]; then
+              echo "==> Checking $d"
+              terraform -chdir="$d" init -backend=false >/dev/null 2>&1 || true
+              terraform -chdir="$d" fmt -check || (echo "terraform fmt check failed in $d" && exit 1)
+              terraform -chdir="$d" validate || (echo "terraform validate failed in $d" && exit 1)
+            fi
+          done
+
+      - name: Prepare backend resource names
+        id: prepare
+        run: |
+          OWNER="${GITHUB_REPOSITORY%%/*}"
+          REPO="${GITHUB_REPOSITORY##*/}"
+          OWNER_CLEAN=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
+          REPO_CLEAN=$(echo "$REPO" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
+
+          ENV_NAME="${{ github.event.inputs.env }}"
+          if [ -z "$ENV_NAME" ]; then ENV_NAME=dev; fi
+
+          BUCKET="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate"
+          DDB="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate-locks"
+
+          echo "bucket_name=$BUCKET" >> $GITHUB_OUTPUT
+          echo "dynamodb_table_name=$DDB" >> $GITHUB_OUTPUT
+
+      - name: Verify AWS credentials
+        run: |
+          aws sts get-caller-identity || (echo "AWS credentials invalid or not provided" >&2 && exit 1)
+
+      - name: Verify backend bucket and DynamoDB lock table
+        run: |
+          set -euo pipefail
+          echo "Checking bucket: ${{ steps.prepare.outputs.bucket_name }}"
+          if ! aws s3api head-bucket --bucket "${{ steps.prepare.outputs.bucket_name }}" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
+            echo "ERROR: Backend S3 bucket '${{ steps.prepare.outputs.bucket_name }}' not found or inaccessible. Run the 'Terraform Backend Setup' workflow." >&2
+            exit 1
+          fi
+          echo "Checking DynamoDB table: ${{ steps.prepare.outputs.dynamodb_table_name }}"
+          if ! aws dynamodb describe-table --table-name "${{ steps.prepare.outputs.dynamodb_table_name }}" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
+            echo "ERROR: Backend DynamoDB table '${{ steps.prepare.outputs.dynamodb_table_name }}' not found or inaccessible. Run the 'Terraform Backend Setup' workflow." >&2
+            exit 1
+          fi
+
+      - name: Detect conflicting existing resources
+        run: |
+          set -euo pipefail
+          CONFLICTS=0
+          REPO_NAME="paguebem-qrreader"
+          if aws ecr describe-repositories --repository-names "$REPO_NAME" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
+            echo "Conflict: ECR repository '$REPO_NAME' already exists. Run the 'Import resources' workflow before Deploy to import it into Terraform state." >&2
+            CONFLICTS=1
+          fi
+
+          ROLE_NAME="paguebem-qrreader-lambda-role"
+          if aws iam get-role --role-name "$ROLE_NAME" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
+            echo "Conflict: IAM role '$ROLE_NAME' already exists. Run the 'Import resources' workflow before Deploy to import it into Terraform state." >&2
+            CONFLICTS=1
+          fi
+
+          LAMBDA_NAME="paguebem-qrreader"
+          if aws lambda get-function --function-name "$LAMBDA_NAME" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
+            echo "Conflict: Lambda function '$LAMBDA_NAME' already exists. Run the 'Import resources' workflow before Deploy to import it into Terraform state." >&2
+            CONFLICTS=1
+          fi
+
+          if [ "$CONFLICTS" -ne 0 ]; then
+            exit 1
+          fi
+
   deploy:
+    name: Deploy (plan/apply modules)
+    needs: preflight
     runs-on: ubuntu-latest
     env:
       AWS_REGION: ${{ github.event.inputs.aws_region }}
@@ -44,6 +149,8 @@ jobs:
       IMAGE_DIR: ${{ github.event.inputs.image_dir }}
       COMPONENTS: ${{ github.event.inputs.components }}
       IMAGE_URI_INPUT: ${{ github.event.inputs.image_uri }}
+      BACKEND_BUCKET: ${{ needs.preflight.outputs.bucket_name }}
+      BACKEND_TABLE: ${{ needs.preflight.outputs.dynamodb_table_name }}
 
     steps:
       - name: Checkout
@@ -61,33 +168,6 @@ jobs:
         with:
           terraform_version: '1.5.0'
 
-      - name: Prepare backend names
-        id: prepare_backend
-        run: |
-          OWNER="${GITHUB_REPOSITORY%%/*}"
-          REPO="${GITHUB_REPOSITORY##*/}"
-          # sanitize owner and repo names: lowercase + only a-z0-9 and hyphen
-          OWNER_CLEAN=$(echo "$OWNER" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
-          REPO_CLEAN=$(echo "$REPO" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | cut -c1-30)
-
-          ENV_NAME="${{ github.event.inputs.env }}"
-          if [ -z "$ENV_NAME" ]; then ENV_NAME=dev; fi
-
-          BACKEND_BUCKET="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate"
-          BACKEND_TABLE="${OWNER_CLEAN}-${REPO_CLEAN}-${ENV_NAME}-tfstate-locks"
-
-          # Validate bucket name
-          if ! echo "$BACKEND_BUCKET" | grep -E -q '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'; then
-            echo "ERROR: computed S3 bucket name '$BACKEND_BUCKET' is invalid for S3. Try changing the repository name or the 'env' input." >&2
-            exit 1
-          fi
-
-          echo "BACKEND_BUCKET=$BACKEND_BUCKET" >> $GITHUB_ENV
-          echo "BACKEND_TABLE=$BACKEND_TABLE" >> $GITHUB_ENV
-          echo "backend_bucket=$BACKEND_BUCKET" >> $GITHUB_OUTPUT
-          echo "backend_table=$BACKEND_TABLE" >> $GITHUB_OUTPUT
-          echo "Using backend bucket: $BACKEND_BUCKET and table: $BACKEND_TABLE"
-
       - name: Deploy ECR repository (terraform)
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
         id: ecr_apply
@@ -104,14 +184,7 @@ jobs:
           # Determine expected repository name (from module default or variable)
           REPO_NAME="paguebem-qrreader"
 
-          # If repository already exists in ECR, import it into Terraform state to avoid create errors
-          if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-            echo "ECR repository $REPO_NAME already exists; importing into Terraform state (if not already imported)"
-            if ! terraform -chdir=infrastructure/ecr import -lock=false aws_ecr_repository.this "$REPO_NAME"; then
-              echo "ERROR: failed to import existing ECR repository $REPO_NAME into Terraform state. Ensure AWS credentials used by Actions have ecr:DescribeRepositories and ecr:GetRepositoryPolicy permissions." >&2
-              exit 1
-            fi
-          fi
+          # Note: if the ECR repository already exists, run the manual 'Import Existing Resources' workflow to import it into Terraform state
 
           # Plan and apply only when changes are detected
           set +e
@@ -188,18 +261,7 @@ jobs:
             -backend-config="key=lambda/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure -input=false
 
-          # If an IAM role with the expected name already exists, import it so Terraform won't try to create it
-          ROLE_NAME="${{ github.event.inputs.lambda_role_name }}"
-          if [ -z "$ROLE_NAME" ]; then
-            ROLE_NAME="paguebem-qrreader-lambda-role"
-          fi
-          if aws iam get-role --role-name "$ROLE_NAME" --region $AWS_REGION >/dev/null 2>&1; then
-            echo "IAM role $ROLE_NAME exists; importing into Terraform state"
-            if ! terraform -chdir=infrastructure/lambda import -lock=false aws_iam_role.lambda_exec "$ROLE_NAME" -var "image_uri=${image_uri}" -var "region=${AWS_REGION}" -input=false; then
-              echo "ERROR: failed to import IAM role $ROLE_NAME into Terraform state. Ensure AWS credentials used by Actions have iam:GetRole and iam:PassRole permissions." >&2
-              exit 1
-            fi
-          fi
+          # Note: if an IAM role already exists, run the manual 'Import Existing Resources' workflow to import it into Terraform state
 
           # If the Lambda function already exists in AWS, import it into Terraform state to avoid create errors
           LAMBDA_NAME="${{ github.event.inputs.lambda_function_name }}"
