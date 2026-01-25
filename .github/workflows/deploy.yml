@@ -88,11 +88,13 @@ jobs:
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
         id: ecr_apply
         run: |
+          set -euo pipefail
+          export TF_INPUT=0
           terraform -chdir=infrastructure/ecr init \
             -backend-config="bucket=$BACKEND_BUCKET" \
             -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=ecr/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure -input=false
 
           # Determine expected repository name (from module default or variable)
           REPO_NAME="paguebem-qrreader"
@@ -126,6 +128,8 @@ jobs:
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'lambda') }}
         id: lambda_apply
         run: |
+          set -euo pipefail
+          export TF_INPUT=0
           # Determine image_uri: prefer input IMAGE_URI, else use built image
           image_uri="${IMAGE_URI_INPUT}"
           if [ -z "$image_uri" ]; then
@@ -134,14 +138,15 @@ jobs:
             fi
           fi
           if [ -z "$image_uri" ]; then
-            echo "No image URI available: set workflow input image_uri or deploy the ecr component first" && exit 1
+            echo "ERROR: No image URI available. Set workflow input image_uri or ensure ECR component is deployed first." >&2
+            exit 1
           fi
 
           terraform -chdir=infrastructure/lambda init \
             -backend-config="bucket=$BACKEND_BUCKET" \
             -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=lambda/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure -input=false
 
           # If an IAM role with the expected name already exists, import it so Terraform won't try to create it
           ROLE_NAME="${{ github.event.inputs.lambda_role_name }}"
@@ -153,7 +158,7 @@ jobs:
             terraform -chdir=infrastructure/lambda import -lock=false aws_iam_role.lambda_exec "$ROLE_NAME" || true
           fi
 
-          terraform -chdir=infrastructure/lambda apply -auto-approve \
+          terraform -chdir=infrastructure/lambda apply -input=false -auto-approve \
             -var "image_uri=${image_uri}" -var "region=${{ env.AWS_REGION }}"
 
           fn_arn=$(terraform -chdir=infrastructure/lambda output -raw function_arn 2>/dev/null | tr -d '\r')
