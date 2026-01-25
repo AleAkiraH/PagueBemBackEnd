@@ -107,7 +107,10 @@ jobs:
           # If repository already exists in ECR, import it into Terraform state to avoid create errors
           if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
             echo "ECR repository $REPO_NAME already exists; importing into Terraform state (if not already imported)"
-            terraform -chdir=infrastructure/ecr import -lock=false aws_ecr_repository.this "$REPO_NAME" || true
+            if ! terraform -chdir=infrastructure/ecr import -lock=false aws_ecr_repository.this "$REPO_NAME"; then
+              echo "ERROR: failed to import existing ECR repository $REPO_NAME into Terraform state. Ensure AWS credentials used by Actions have ecr:DescribeRepositories and ecr:GetRepositoryPolicy permissions." >&2
+              exit 1
+            fi
           fi
 
           # Plan and apply only when changes are detected
@@ -134,7 +137,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image to ECR
-        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'ecr') }}
         run: |
           repo_url=${{ steps.ecr_apply.outputs.repo_url }}
           if [ -z "$repo_url" ]; then echo "repo_url not found" && exit 1; fi
@@ -175,7 +178,10 @@ jobs:
           fi
           if aws iam get-role --role-name "$ROLE_NAME" --region $AWS_REGION >/dev/null 2>&1; then
             echo "IAM role $ROLE_NAME exists; importing into Terraform state"
-            terraform -chdir=infrastructure/lambda import -lock=false aws_iam_role.lambda_exec "$ROLE_NAME" || true
+            if ! terraform -chdir=infrastructure/lambda import -lock=false aws_iam_role.lambda_exec "$ROLE_NAME"; then
+              echo "ERROR: failed to import IAM role $ROLE_NAME into Terraform state. Ensure AWS credentials used by Actions have iam:GetRole and iam:PassRole permissions." >&2
+              exit 1
+            fi
           fi
 
           # If the Lambda function already exists in AWS, import it into Terraform state to avoid create errors
@@ -185,7 +191,10 @@ jobs:
           fi
           if aws lambda get-function --function-name "$LAMBDA_NAME" --region $AWS_REGION >/dev/null 2>&1; then
             echo "Lambda function $LAMBDA_NAME exists; importing into Terraform state"
-            terraform -chdir=infrastructure/lambda import -lock=false aws_lambda_function.this "$LAMBDA_NAME" || true
+            if ! terraform -chdir=infrastructure/lambda import -lock=false aws_lambda_function.this "$LAMBDA_NAME"; then
+              echo "ERROR: failed to import existing Lambda function $LAMBDA_NAME. Ensure AWS credentials used by Actions have lambda:GetFunction permission." >&2
+              exit 1
+            fi
           fi
 
           # Plan and apply only when changes are detected
