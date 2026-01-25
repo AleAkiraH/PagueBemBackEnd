@@ -26,6 +26,14 @@ on:
       image_uri:
         description: '(Optional) existing image URI to use for Lambda (overrides building/pushing)'
         required: false
+      import_existing:
+        description: 'If true, run import of existing resources before deployment (manual opt-in)'
+        required: false
+        default: 'false'
+      ecr_repo_name:
+        description: '(Optional) ECR repository name to import when import_existing=true'
+        required: false
+        default: 'paguebem-qrreader'
       lambda_role_name:
         description: '(Optional) IAM role name for Lambda. If the role already exists it will be imported into Terraform state.'
         required: false
@@ -119,24 +127,29 @@ jobs:
           CONFLICTS=0
           REPO_NAME="paguebem-qrreader"
           if aws ecr describe-repositories --repository-names "$REPO_NAME" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
-            echo "Conflict: ECR repository '$REPO_NAME' already exists. Run the 'Import resources' workflow before Deploy to import it into Terraform state." >&2
+            echo "Conflict: ECR repository '$REPO_NAME' already exists."
             CONFLICTS=1
           fi
 
           ROLE_NAME="paguebem-qrreader-lambda-role"
           if aws iam get-role --role-name "$ROLE_NAME" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
-            echo "Conflict: IAM role '$ROLE_NAME' already exists. Run the 'Import resources' workflow before Deploy to import it into Terraform state." >&2
+            echo "Conflict: IAM role '$ROLE_NAME' already exists."
             CONFLICTS=1
           fi
 
           LAMBDA_NAME="paguebem-qrreader"
           if aws lambda get-function --function-name "$LAMBDA_NAME" --region ${{ github.event.inputs.aws_region }} >/dev/null 2>&1; then
-            echo "Conflict: Lambda function '$LAMBDA_NAME' already exists. Run the 'Import resources' workflow before Deploy to import it into Terraform state." >&2
+            echo "Conflict: Lambda function '$LAMBDA_NAME' already exists."
             CONFLICTS=1
           fi
 
+          # If import_existing requested, allow conflicts and proceed (imports will run in Deploy)
           if [ "$CONFLICTS" -ne 0 ]; then
-            exit 1
+            if [ "${{ github.event.inputs.import_existing }}" = "true" ]; then
+              echo "Conflicts detected but import_existing=true: proceeding to import existing resources in Deploy.";
+            else
+              exit 1
+            fi
           fi
 
   deploy:
@@ -167,6 +180,40 @@ jobs:
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: '1.5.0'
+
+      - name: Import existing resources (optional)
+        if: ${{ github.event.inputs.import_existing == 'true' }}
+        run: |
+          set -euo pipefail
+          export TF_INPUT=0
+          echo "==> import_existing selected: attempting to import ECR / IAM role / Lambda where present"
+
+          REPO_NAME="${{ github.event.inputs.ecr_repo_name }}"
+          if aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "Importing ECR repository $REPO_NAME"
+            terraform -chdir=infrastructure/ecr init -backend-config="bucket=$BACKEND_BUCKET" -backend-config="dynamodb_table=$BACKEND_TABLE" -backend-config="key=ecr/terraform.tfstate" -backend-config="region=$AWS_REGION" -reconfigure -input=false
+            TF_VAR_region="$AWS_REGION" terraform -chdir=infrastructure/ecr import -lock=false -input=false aws_ecr_repository.this "$REPO_NAME" || { echo "Failed to import ECR repository $REPO_NAME" >&2; exit 1; }
+          else
+            echo "ECR repository $REPO_NAME not found; skipping ECR import"
+          fi
+
+          ROLE_NAME="${{ github.event.inputs.lambda_role_name }}"
+          if aws iam get-role --role-name "$ROLE_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "Importing IAM role $ROLE_NAME"
+            TF_VAR_image_uri="__IMPORT_PLACEHOLDER__" TF_VAR_region="$AWS_REGION" terraform -chdir=infrastructure/lambda import -lock=false -input=false aws_iam_role.lambda_exec "$ROLE_NAME" || { echo "Failed to import IAM role $ROLE_NAME" >&2; exit 1; }
+          else
+            echo "IAM role $ROLE_NAME not found; skipping role import"
+          fi
+
+          LAMBDA_NAME="${{ github.event.inputs.lambda_function_name }}"
+          if aws lambda get-function --function-name "$LAMBDA_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "Importing Lambda function $LAMBDA_NAME"
+            existing_image=$(aws lambda get-function --function-name "$LAMBDA_NAME" --region $AWS_REGION --query 'Code.ImageUri' --output text 2>/dev/null || true)
+            if [ -n "$existing_image" ] && [ "$existing_image" != "None" ]; then IMAGE_URI="$existing_image"; else IMAGE_URI="__IMPORT_PLACEHOLDER__"; fi
+            TF_VAR_image_uri="$IMAGE_URI" TF_VAR_region="$AWS_REGION" terraform -chdir=infrastructure/lambda import -lock=false -input=false aws_lambda_function.this "$LAMBDA_NAME" || { echo "Failed to import Lambda function $LAMBDA_NAME" >&2; exit 1; }
+          else
+            echo "Lambda function $LAMBDA_NAME not found; skipping lambda import"
+          fi
 
       - name: Deploy ECR repository (terraform)
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
@@ -368,5 +415,5 @@ jobs:
         run: |
           echo "Deployed components: ${COMPONENTS}"
           echo "ECR repo: ${repo_url:-(not created in this run)}"
-          echo "Lambda ARN: ${{ steps.lambda_apply.outputs.fn_arn }}"
+          echo "Lambda ARN: ${{ steps.lambda_apply.outputs.fn_arn }}
 

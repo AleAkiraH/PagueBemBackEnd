@@ -1,0 +1,23 @@
+# This file is an archived copy of the workflow that used to import existing resources into Terraform state.
+# It was moved from .github/workflows/import-resources.yml and disabled there.
+# Keep it for reference or to re-enable manually if needed.
+
+name: "Import Existing Resources (archived)"
+
+on: [workflow_dispatch]
+
+# The original workflow content is preserved here for reference.
+# If you need to re-enable it, copy/restore into .github/workflows/import-resources.yml
+
+# Original main steps:
+# - Checkout
+# - Configure AWS credentials
+# - Setup Terraform
+# - Compute backend names
+# - Import ECR repository
+# - Import IAM role
+# - Import Lambda function
+# - Final status
+
+# NOTE: this archived workflow is not active. Prefer using the 'import_existing' input on the 'Deploy Infrastructure' workflow
+# or run the active 'Import Existing Resources' workflow from the Actions tab if it exists.
