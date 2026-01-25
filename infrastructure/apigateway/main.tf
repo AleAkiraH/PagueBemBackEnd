@@ -16,9 +16,9 @@ resource "aws_apigatewayv2_integration" "lambda" {
 }
 
 resource "aws_apigatewayv2_route" "route" {
-  api_id   = aws_apigatewayv2_api.this.id
+  api_id    = aws_apigatewayv2_api.this.id
   route_key = "POST /decode"
-  target   = "integrations/${aws_apigatewayv2_integration.lambda.id}"
+  target    = "integrations/${aws_apigatewayv2_integration.lambda.id}"
 }
 
 resource "aws_apigatewayv2_stage" "default" {
