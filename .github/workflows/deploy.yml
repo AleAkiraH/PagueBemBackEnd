@@ -30,6 +30,10 @@ on:
         description: '(Optional) IAM role name for Lambda. If the role already exists it will be imported into Terraform state.'
         required: false
         default: ''
+      lambda_function_name:
+        description: '(Optional) Lambda function name. If the function already exists it will be imported into Terraform state.'
+        required: false
+        default: ''
 
 jobs:
   deploy:
@@ -90,6 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           export TF_INPUT=0
+
           terraform -chdir=infrastructure/ecr init \
             -backend-config="bucket=$BACKEND_BUCKET" \
             -backend-config="dynamodb_table=$BACKEND_TABLE" \
@@ -105,17 +110,31 @@ jobs:
             terraform -chdir=infrastructure/ecr import -lock=false aws_ecr_repository.this "$REPO_NAME" || true
           fi
 
-          # Apply will create or reconcile repository configuration
-          terraform -chdir=infrastructure/ecr apply -auto-approve -var "region=${{ env.AWS_REGION }}"
+          # Plan and apply only when changes are detected
+          set +e
+          terraform -chdir=infrastructure/ecr plan -input=false -detailed-exitcode -out=plan.tfplan -var "region=${{ env.AWS_REGION }}"
+          PLAN_EXIT=$?
+          set -e
 
-          # Get repository URI from AWS and set as output safely
-          repo_url=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text 2>/dev/null | tr -d '\r')
+          if [ "$PLAN_EXIT" -eq 0 ]; then
+            echo "No changes in ECR module; skipping apply"
+            repo_url=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text 2>/dev/null | tr -d '\r')
+          elif [ "$PLAN_EXIT" -eq 2 ]; then
+            echo "Changes detected in ECR module; applying"
+            terraform -chdir=infrastructure/ecr apply -input=false -auto-approve plan.tfplan
+            repo_url=$(aws ecr describe-repositories --repository-names "$REPO_NAME" --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text 2>/dev/null | tr -d '\r')
+          else
+            echo "Terraform plan failed with exit code $PLAN_EXIT" >&2
+            exit $PLAN_EXIT
+          fi
+
+          # set output safely
           echo "repo_url<<EOF" >> $GITHUB_OUTPUT
           echo "$repo_url" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image to ECR
-        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'ecr') }}
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
         run: |
           repo_url=${{ steps.ecr_apply.outputs.repo_url }}
           if [ -z "$repo_url" ]; then echo "repo_url not found" && exit 1; fi
@@ -130,6 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           export TF_INPUT=0
+
           # Determine image_uri: prefer input IMAGE_URI, else use built image
           image_uri="${IMAGE_URI_INPUT}"
           if [ -z "$image_uri" ]; then
@@ -158,11 +178,43 @@ jobs:
             terraform -chdir=infrastructure/lambda import -lock=false aws_iam_role.lambda_exec "$ROLE_NAME" || true
           fi
 
-          terraform -chdir=infrastructure/lambda apply -input=false -auto-approve \
-            -var "image_uri=${image_uri}" -var "region=${{ env.AWS_REGION }}"
+          # If the Lambda function already exists in AWS, import it into Terraform state to avoid create errors
+          LAMBDA_NAME="${{ github.event.inputs.lambda_function_name }}"
+          if [ -z "$LAMBDA_NAME" ]; then
+            LAMBDA_NAME="paguebem-qrreader"
+          fi
+          if aws lambda get-function --function-name "$LAMBDA_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "Lambda function $LAMBDA_NAME exists; importing into Terraform state"
+            terraform -chdir=infrastructure/lambda import -lock=false aws_lambda_function.this "$LAMBDA_NAME" || true
+          fi
 
-          fn_arn=$(terraform -chdir=infrastructure/lambda output -raw function_arn 2>/dev/null | tr -d '\r')
-          fn_name=$(terraform -chdir=infrastructure/lambda output -raw function_name 2>/dev/null | tr -d '\r')
+          # Plan and apply only when changes are detected
+          set +e
+          terraform -chdir=infrastructure/lambda plan -input=false -detailed-exitcode -out=plan.tfplan -var "image_uri=${image_uri}" -var "region=${{ env.AWS_REGION }}"
+          PLAN_EXIT=$?
+          set -e
+
+          if [ "$PLAN_EXIT" -eq 0 ]; then
+            echo "No changes in Lambda module; skipping apply"
+            fn_arn=$(aws lambda get-function --function-name "$LAMBDA_NAME" --region $AWS_REGION --query 'Configuration.FunctionArn' --output text 2>/dev/null | tr -d '\r')
+            fn_name="$LAMBDA_NAME"
+          elif [ "$PLAN_EXIT" -eq 2 ]; then
+            echo "Changes detected in Lambda module; applying"
+            terraform -chdir=infrastructure/lambda apply -input=false -auto-approve plan.tfplan
+            fn_arn=$(terraform -chdir=infrastructure/lambda output -raw function_arn 2>/dev/null | tr -d '\r' || true)
+            if [ -z "$fn_arn" ]; then
+              fn_arn=$(aws lambda get-function --function-name "$LAMBDA_NAME" --region $AWS_REGION --query 'Configuration.FunctionArn' --output text 2>/dev/null | tr -d '\r')
+            fi
+            fn_name=$(terraform -chdir=infrastructure/lambda output -raw function_name 2>/dev/null | tr -d '\r' || true)
+            if [ -z "$fn_name" ]; then
+              fn_name="$LAMBDA_NAME"
+            fi
+          else
+            echo "Terraform plan failed with exit code $PLAN_EXIT" >&2
+            exit $PLAN_EXIT
+          fi
+
+          # set outputs safely
           echo "fn_arn<<EOF" >> $GITHUB_OUTPUT
           echo "$fn_arn" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -173,38 +225,56 @@ jobs:
       - name: Deploy API Gateway (terraform)
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'apigateway') }}
         run: |
-          fn_arn="${{ github.event.inputs.lambda_arn }}"
-          fn_name="${{ github.event.inputs.lambda_name }}"
-          if [ -z "$fn_arn" ]; then
-            fn_arn="${{ steps.lambda_apply.outputs.fn_arn }}"
-          fi
-          if [ -z "$fn_name" ]; then
-            fn_name="${{ steps.lambda_apply.outputs.fn_name }}"
-          fi
-
-          if [ -z "$fn_arn" ]; then
-            echo "function ARN not found. Ensure lambda was deployed first or pass lambda_arn input." && exit 1
-          fi
+          set -euo pipefail
+          export TF_INPUT=0
 
           terraform -chdir=infrastructure/apigateway init \
             -backend-config="bucket=$BACKEND_BUCKET" \
             -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=apigateway/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure -input=false
 
-          terraform -chdir=infrastructure/apigateway apply -auto-approve \
-            -var "lambda_arn=${fn_arn}" -var "lambda_name=${fn_name}" -var "region=${{ env.AWS_REGION }}"
+          set +e
+          terraform -chdir=infrastructure/apigateway plan -input=false -detailed-exitcode -out=plan.tfplan -var "lambda_arn=${fn_arn}" -var "lambda_name=${fn_name}" -var "region=${{ env.AWS_REGION }}"
+          PLAN_EXIT=$?
+          set -e
+
+          if [ "$PLAN_EXIT" -eq 0 ]; then
+            echo "No changes in API Gateway module; skipping apply"
+          elif [ "$PLAN_EXIT" -eq 2 ]; then
+            echo "Changes detected in API Gateway module; applying"
+            terraform -chdir=infrastructure/apigateway apply -input=false -auto-approve plan.tfplan
+          else
+            echo "Terraform plan failed with exit code $PLAN_EXIT" >&2
+            exit $PLAN_EXIT
+          fi
 
       - name: Deploy DynamoDB (terraform)
         if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'dynamodb') }}
         run: |
+          set -euo pipefail
+          export TF_INPUT=0
+
           terraform -chdir=infrastructure/dynamodb init \
             -backend-config="bucket=$BACKEND_BUCKET" \
             -backend-config="dynamodb_table=$BACKEND_TABLE" \
             -backend-config="key=dynamodb/terraform.tfstate" \
-            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
+            -backend-config="region=${{ env.AWS_REGION }}" -reconfigure -input=false
 
-          terraform -chdir=infrastructure/dynamodb apply -auto-approve -var "region=${{ env.AWS_REGION }}"
+          set +e
+          terraform -chdir=infrastructure/dynamodb plan -input=false -detailed-exitcode -out=plan.tfplan -var "region=${{ env.AWS_REGION }}"
+          PLAN_EXIT=$?
+          set -e
+
+          if [ "$PLAN_EXIT" -eq 0 ]; then
+            echo "No changes in DynamoDB module; skipping apply"
+          elif [ "$PLAN_EXIT" -eq 2 ]; then
+            echo "Changes detected in DynamoDB module; applying"
+            terraform -chdir=infrastructure/dynamodb apply -input=false -auto-approve plan.tfplan
+          else
+            echo "Terraform plan failed with exit code $PLAN_EXIT" >&2
+            exit $PLAN_EXIT
+          fi
 
       - name: Output summary
         run: |
