@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload de Imagem - Protótipo Mobile</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        :root {
+            --primary: #3b82f6;
+            --accent: #22c55e;
+            --background: #f8fafc;
+            --text: #1e293b;
+            --border-radius: 12px;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: var(--background);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: flex-start;
+        }
+        header {
+            width: 100%;
+            padding: 24px 0 12px 0;
+            background: var(--primary);
+            color: #fff;
+            text-align: center;
+            font-size: 1.5rem;
+            font-weight: 600;
+            letter-spacing: 1px;
+            border-bottom-left-radius: 24px;
+            border-bottom-right-radius: 24px;
+        }
+        main {
+            width: 100%;
+            max-width: 420px;
+            margin: 0 auto;
+            padding: 24px 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .instruction {
+            font-size: 1.1rem;
+            margin-bottom: 24px;
+            text-align: center;
+        }
+        .upload-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--primary);
+            color: #fff;
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 16px 24px;
+            font-size: 1.1rem;
+            font-weight: 500;
+            cursor: pointer;
+            margin-bottom: 20px;
+            transition: background 0.2s;
+        }
+        .upload-btn:hover, .upload-btn:focus {
+            background: #2563eb;
+        }
+        .upload-btn svg {
+            margin-right: 10px;
+        }
+        .preview {
+            margin-bottom: 20px;
+            width: 100%;
+            max-width: 320px;
+            min-height: 180px;
+            background: #e5e7eb;
+            border-radius: var(--border-radius);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overflow: hidden;
+        }
+        .preview img {
+            width: 100%;
+            height: auto;
+            object-fit: contain;
+        }
+        .send-btn {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 14px 24px;
+            font-size: 1.1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .send-btn:disabled {
+            background: #a7f3d0;
+            color: #fff;
+            cursor: not-allowed;
+        }
+        .feedback {
+            margin-top: 18px;
+            font-size: 1rem;
+            text-align: center;
+        }
+        @media (max-width: 640px) {
+            main {
+                padding: 16px 4vw;
+            }
+            .preview {
+                min-height: 120px;
+                max-width: 90vw;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>Upload de Imagem</header>
+    <main>
+        <div class="instruction">Envie uma foto usando a câmera ou escolha da galeria.</div>
+        <input id="fileInput" type="file" accept="image/*" capture="environment" style="display:none" />
+        <button class="upload-btn" onclick="document.getElementById('fileInput').click()">
+            <svg width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><circle cx="12" cy="13" r="4"/><path d="M5 7V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v2"/></svg>
+            Tirar foto ou escolher imagem
+        </button>
+        <div class="preview" id="preview">
+            <span style="color:#64748b;">Nenhuma imagem selecionada</span>
+        </div>
+        <button class="send-btn" id="sendBtn" disabled>Enviar imagem</button>
+        <div class="feedback" id="feedback"></div>
+    </main>
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const preview = document.getElementById('preview');
+        const sendBtn = document.getElementById('sendBtn');
+        const feedback = document.getElementById('feedback');
+        let selectedFile = null;
+
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file && file.type.startsWith('image/')) {
+                selectedFile = file;
+                const reader = new FileReader();
+                reader.onload = function(ev) {
+                    preview.innerHTML = `<img src="${ev.target.result}" alt="Preview da imagem" />`;
+                };
+                reader.readAsDataURL(file);
+                sendBtn.disabled = false;
+                feedback.textContent = '';
+            } else {
+                preview.innerHTML = '<span style="color:#64748b;">Nenhuma imagem selecionada</span>';
+                sendBtn.disabled = true;
+                feedback.textContent = 'Por favor, selecione uma imagem válida.';
+            }
+        });
+
+        sendBtn.addEventListener('click', () => {
+            if (!selectedFile) return;
+            sendBtn.disabled = true;
+            feedback.textContent = 'Enviando imagem... (mock)';
+            setTimeout(() => {
+                feedback.textContent = 'Imagem enviada com sucesso! (mock)';
+                sendBtn.disabled = false;
+            }, 1200);
+        });
+    </script>
+</body>
+</html>

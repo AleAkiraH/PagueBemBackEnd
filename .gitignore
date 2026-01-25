@@ -17,3 +17,6 @@ docker-image*
 # IDEs
 .vscode/
 .idea/
+FrontEnd/tempfrontend/
+frontend/.next/
+frontend/node_modules/
