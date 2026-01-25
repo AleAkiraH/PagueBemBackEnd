@@ -26,6 +26,10 @@ on:
       image_uri:
         description: '(Optional) existing image URI to use for Lambda (overrides building/pushing)'
         required: false
+      lambda_role_name:
+        description: '(Optional) IAM role name for Lambda. If the role already exists it will be imported into Terraform state.'
+        required: false
+        default: ''
 
 jobs:
   deploy:
@@ -109,7 +113,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Build and push Docker image to ECR
-        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'ecr') }}
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'ecr') }}
         run: |
           repo_url=${{ steps.ecr_apply.outputs.repo_url }}
           if [ -z "$repo_url" ]; then echo "repo_url not found" && exit 1; fi
@@ -119,7 +123,7 @@ jobs:
           docker push ${repo_url}:${IMAGE_TAG}
 
       - name: Deploy Lambda (terraform)
-        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'lambda') }}
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'lambda') }}
         id: lambda_apply
         run: |
           # Determine image_uri: prefer input IMAGE_URI, else use built image
@@ -139,6 +143,16 @@ jobs:
             -backend-config="key=lambda/terraform.tfstate" \
             -backend-config="region=${{ env.AWS_REGION }}" -reconfigure
 
+          # If an IAM role with the expected name already exists, import it so Terraform won't try to create it
+          ROLE_NAME="${{ github.event.inputs.lambda_role_name }}"
+          if [ -z "$ROLE_NAME" ]; then
+            ROLE_NAME="paguebem-qrreader-lambda-role"
+          fi
+          if aws iam get-role --role-name "$ROLE_NAME" --region $AWS_REGION >/dev/null 2>&1; then
+            echo "IAM role $ROLE_NAME exists; importing into Terraform state"
+            terraform -chdir=infrastructure/lambda import -lock=false aws_iam_role.lambda_exec "$ROLE_NAME" || true
+          fi
+
           terraform -chdir=infrastructure/lambda apply -auto-approve \
             -var "image_uri=${image_uri}" -var "region=${{ env.AWS_REGION }}"
 
@@ -152,7 +166,7 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Deploy API Gateway (terraform)
-        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'apigateway') }}
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'apigateway') }}
         run: |
           fn_arn="${{ github.event.inputs.lambda_arn }}"
           fn_name="${{ github.event.inputs.lambda_name }}"
@@ -177,7 +191,7 @@ jobs:
             -var "lambda_arn=${fn_arn}" -var "lambda_name=${fn_name}" -var "region=${{ env.AWS_REGION }}"
 
       - name: Deploy DynamoDB (terraform)
-        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs.components, 'dynamodb') }}
+        if: ${{ github.event.inputs.components == 'all' || contains(github.event.inputs, 'dynamodb') }}
         run: |
           terraform -chdir=infrastructure/dynamodb init \
             -backend-config="bucket=$BACKEND_BUCKET" \
