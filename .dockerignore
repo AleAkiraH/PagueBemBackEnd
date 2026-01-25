@@ -1,0 +1,10 @@
+# Ignore terraform and build artifacts
+infrastructure/
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.log
+.git
+node_modules
+__pycache__
